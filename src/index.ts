@@ -66,6 +66,11 @@ export type {
   ComposerContext,
 } from "./types.js";
 
+// Dynamic Composer
+export { DynamicComposer } from "./dynamic/composer.js";
+export { arg } from "./dynamic/types.js";
+export { formatComposedSummary } from "./dynamic/report.js";
+
 // Types — simulation engine
 export type {
   BalanceSnapshot,
@@ -82,3 +87,14 @@ export type {
   DiagnosedError,
   FlowReport,
 } from "./simulation/types.js";
+
+// Types — dynamic composer
+export type {
+  StepArg,
+  RefMode,
+  ComposerStep,
+  ComposedResult,
+  StepArgJSON,
+  DynamicStepJSON,
+  DynamicPlanJSON,
+} from "./dynamic/types.js";
