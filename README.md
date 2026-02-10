@@ -1,16 +1,8 @@
 # tx-composer
 
-Simulate-first DeFi transaction composer for Aptos. Build, dry-run, and execute complex multi-step DeFi flows with balance tracking, error diagnosis, and human-readable reports — before committing real funds.
+Generalized DeFi transaction composer for Aptos. Compose any Move function calls into atomic transactions with integrated simulation, balance tracking, and error diagnosis — all before committing real funds.
 
-Built for AI agents and programmatic DeFi execution where you need to **know exactly what will happen** before signing anything.
-
-## What It Does
-
-- **Dry-run multi-step flows**: Simulate a sequence of transactions (swap → repay → withdraw) and see exactly how balances change at each step
-- **Atomic composition**: Combine multiple DeFi operations into a single all-or-nothing transaction using [Aptos Script Composer](https://aptos.dev/build/sdks/ts-sdk/building-transactions/script-composer)
-- **Error diagnosis**: Pattern-match Move VM errors into actionable messages ("Repay amount exceeds debt — use repay_all instead")
-- **Balance tracking**: Capture before/after snapshots, compute per-token deltas, validate expectations
-- **Protocol adapters**: Pluggable adapters for DEXs and lending protocols with both entry-function and composable interfaces
+Works with **any protocol** on Aptos. No adapters required — just specify the Move functions you want to call and how to wire outputs between them.
 
 ## Install
 
@@ -20,367 +12,254 @@ npm install tx-composer
 
 Requires `@aptos-labs/ts-sdk` v5+.
 
-## Quick Start
+## DynamicComposer — The Core API
+
+Compose any Move function calls into a single atomic transaction. Wire return values between steps. Simulate and get a full report. Execute if it passes.
 
 ```typescript
 import { Network } from "@aptos-labs/ts-sdk";
-import {
-  AptosClient,
-  getFABalance,
-  formatAmount,
-  buildAndSimulate,
-  executeTransaction,
-  HyperionAdapter,
-} from "tx-composer";
+import { AptosClient, DynamicComposer, arg } from "tx-composer";
 
-// Initialize — pass privateKey to enable execution, or publicKey for simulation-only
 const client = new AptosClient({
   network: Network.MAINNET,
   privateKey: process.env.APTOS_PRIVATE_KEY,
+  // or: publicKey: "0x..." for simulation-only (no execution)
 });
 
-const hyperion = new HyperionAdapter();
+const USDC_META = "0xbae207659db88bea0cbead6da0ed00aac12edcdda169e591cd41c94180b46f3b";
+const USD1_META = "0x05fabd1b12e39967a3c24e91b7b8f67719a6dacee74f3c8b9fb7d93e855437d2";
 
-// Define tokens
-const USDC = { symbol: "USDC", metadata: "0xbae207...", decimals: 6 };
-const USD1 = { symbol: "USD1", metadata: "0x05fabd...", decimals: 6 };
-
-// Check balance
-const balance = await getFABalance(client.aptos, client.address, USDC.metadata);
-console.log(`USDC: ${formatAmount(balance, 6)}`);
-
-// Simulate a swap
-const payload = hyperion.buildSwapPayload({
-  pools: [hyperion.getPool("USD1_USDC")!],
-  tokenIn: USDC,
-  tokenOut: USD1,
-  amountIn: balance,
-  minAmountOut: (balance * 995n) / 1000n, // 0.5% slippage
-  recipient: client.address,
-});
-
-const { transaction, simulation } = await buildAndSimulate(client, payload);
-console.log(`Success: ${simulation.success}, Gas: ${simulation.gasCostApt} APT`);
-
-// Execute only if simulation passed
-if (simulation.success) {
-  const result = await executeTransaction(client, transaction, "Swap USDC → USD1");
-  console.log(`TX: ${result.hash}`);
-}
-```
-
-## Dry-Run Multi-Step Flows
-
-This is the core feature. Define a multi-step DeFi plan, simulate each step, track how money moves, and get a full report before touching real funds.
-
-### Example: Withdraw from a Lending Position
-
-You have 252 USD1 deposited as collateral and 204 USD1 of debt on Echelon. You deposited 205 USDC to repay. The plan: swap USDC → USD1, repay all debt, withdraw all collateral.
-
-```typescript
-import { Network } from "@aptos-labs/ts-sdk";
-import {
-  AptosClient,
-  SimulationPlanBuilder,
-  dryRun,
-  HyperionAdapter,
-  EchelonAdapter,
-  type TokenConfig,
-} from "tx-composer";
-
-const client = new AptosClient({
-  network: Network.MAINNET,
-  publicKey: "0xc75bb89f...", // simulation-only, no private key needed
-});
-
-const hyperion = new HyperionAdapter();
-const echelon = new EchelonAdapter();
-
-const USDC: TokenConfig = {
-  symbol: "USDC",
-  metadata: "0xbae207659db88bea0cbead6da0ed00aac12edcdda169e591cd41c94180b46f3b",
-  decimals: 6,
-};
-const USD1: TokenConfig = {
-  symbol: "USD1",
-  metadata: "0x05fabd1b12e39967a3c24e91b7b8f67719a6dacee74f3c8b9fb7d93e855437d2",
-  decimals: 6,
-};
-
-const market = echelon.getMarket("USD1")!;
-const pool = hyperion.getPool("USD1_USDC")!;
-
-// Build the plan
-const plan = new SimulationPlanBuilder("Echelon Withdrawal")
-  .describe("Swap USDC → USD1, repay all debt, withdraw all collateral")
-  .forWallet(client.address)
-  .trackTokens([USDC, USD1])
-  .trackVault(market, echelon.address)
-  .addStep({
-    label: "swap",
-    description: "Swap 205 USDC → USD1 via Hyperion",
-    payload: hyperion.buildSwapPayload({
-      pools: [pool],
-      tokenIn: USDC,
-      tokenOut: USD1,
-      amountIn: 205_000000n, // 205 USDC (6 decimals)
-      minAmountOut: 204_000000n, // ~0.5% slippage
-      recipient: client.address,
-    }),
-    expectations: [
-      { type: "balance_decrease", token: USDC.metadata, description: "USDC spent" },
-      { type: "balance_increase", token: USD1.metadata, description: "USD1 received" },
+const result = await new DynamicComposer(client)
+  .addStep("withdraw", {
+    function: "0x1::primary_fungible_store::withdraw",
+    typeArguments: ["0x1::fungible_asset::Metadata"],
+    args: [arg.signer(), arg.literal(USDC_META), arg.literal(205_000000n)],
+  })
+  .addStep("swap", {
+    function: "0x8b4a...::pool_v3::swap",
+    args: [
+      arg.literal("0x1609..."),          // pool address
+      arg.literal(false),                // a_to_b
+      arg.literal(true),                 // exact_input
+      arg.literal(205_000000n),          // amount
+      arg.ref("withdraw", 0),            // FungibleAsset from step "withdraw", return[0]
+      arg.literal("79226673515401279992447579055"), // sqrt_price_limit
     ],
   })
-  .addStep({
-    label: "repay",
-    description: "Repay all USD1 debt on Echelon",
-    payload: echelon.buildRepayAllPayload(market),
-    expectations: [
-      { type: "vault_debt_decrease", description: "Debt cleared" },
-    ],
+  .addStep("deposit_remainder", {
+    function: "0x1::primary_fungible_store::deposit",
+    args: [arg.literal(client.address), arg.ref("swap", 1)],
   })
-  .addStep({
-    label: "withdraw",
-    description: "Withdraw all USD1 collateral from Echelon",
-    payload: echelon.buildWithdrawAllPayload(market),
-    expectations: [
-      { type: "vault_collateral_decrease", description: "Collateral withdrawn" },
-      { type: "balance_increase", token: USD1.metadata, description: "USD1 collateral received" },
-    ],
+  .addStep("deposit_output", {
+    function: "0x1::primary_fungible_store::deposit",
+    args: [arg.literal(client.address), arg.ref("swap", 2)],
   })
-  .build();
+  .trackTokens([
+    { symbol: "USDC", metadata: USDC_META, decimals: 6 },
+    { symbol: "USD1", metadata: USD1_META, decimals: 6 },
+  ])
+  .simulate();
 
-// Run the dry-run
-const report = await dryRun(client, plan);
+console.log(result.summary);
 
-// Print human-readable report
-console.log(report.summary);
-
-// Programmatic access
-if (report.success) {
-  console.log("\nSafe to execute with real funds!");
-  console.log(`Total gas: ${report.totalGasCostApt.toFixed(6)} APT`);
-
-  for (const delta of report.overallDiff.deltas) {
-    if (delta.delta !== 0n) {
-      console.log(`  ${delta.token.symbol}: ${delta.deltaFormatted}`);
-    }
-  }
-} else {
-  console.log("\nDry run FAILED:");
-  for (const err of report.errors) {
-    console.log(`  [${err.code}] ${err.title}`);
-    console.log(`    ${err.suggestion}`);
-  }
+if (result.success) {
+  const exec = await result.execute();
+  console.log(`TX: ${exec.hash}`);
 }
 ```
 
 Output:
 ```
-══ Echelon Withdrawal — Dry Run ══
-Swap USDC → USD1, repay all debt, withdraw all collateral
+== Composed Transaction (4 steps) ==
+Steps: withdraw → swap → deposit_remainder → deposit_output
 
-Starting Balances:
-  USDC   205.000000
-  USD1     0.000000
+Status: OK
+Gas: 0.000064 APT (64 units)
 
-Step 1: Swap 205 USDC → USD1 via Hyperion [OK]
-  USDC   -205.000000
-  USD1   +205.027736
-  ✓ USDC spent (-205.000000 USDC)
-  ✓ USD1 received (+205.027736 USD1)
-  Gas: 0.001234 APT
+Balance Changes:
+  USDC     -1.000000
+  USD1     +1.000417
 
-Step 2: Repay all USD1 debt on Echelon [OK]
-  USD1   -204.191062
-  ✓ Debt cleared (debt 204191062 → 0)
-  Gas: 0.000891 APT
+Events (19):
+  fungible_asset::Withdraw amount=1000000
+  stablecoin::Withdraw amount=1000000
+  pool_v3::SwapBeforeEvent
+  ...
 
-Step 3: Withdraw all USD1 collateral from Echelon [OK]
-  USD1   +252.343981
-  ✓ Collateral withdrawn (collateral 252343981 → 0)
-  ✓ USD1 collateral received (+252.343981 USD1)
-  Gas: 0.000756 APT
-
-Final Balances:
-  USDC     0.000000
-  USD1   253.180655
-
-Net: USDC -205.000000, USD1 +253.180655
-Total Gas: 0.002881 APT
-Result: ALL STEPS PASSED
-
-Note: Each step was simulated against current mainnet state independently.
-Steps 2+ may differ slightly from actual execution since prior steps haven't committed.
+Result: SIMULATION PASSED — safe to execute
 ```
 
-### Example: Detect Failures Before They Happen
+### How It Works
+
+1. **Define steps** as raw Move function calls using `addStep(label, { function, args })`
+2. **Wire outputs** between steps using `arg.ref(stepLabel, returnIndex)` — reference any return value from a prior step
+3. **Compose** into a single atomic transaction via [Aptos Script Composer](https://aptos.dev/build/sdks/ts-sdk/building-transactions/script-composer)
+4. **Simulate** the composed transaction against mainnet
+5. **Execute** only if simulation passes
+
+All steps succeed or all revert — it's a single atomic transaction.
+
+### Argument Types
+
+| Helper | Move Type | Example |
+|--------|-----------|---------|
+| `arg.signer()` | `&signer` | The transaction signer |
+| `arg.literal(value)` | `address`, `u64`, `bool`, `u128`, etc. | `arg.literal("0x1...")`, `arg.literal(100)`, `arg.literal(true)` |
+| `arg.ref(step, index)` | Return value from prior step | `arg.ref("swap", 2)` = return value [2] from step "swap" |
+| `arg.ref(step, index, "borrow")` | `&T` reference | Borrow without consuming |
+| `arg.ref(step, index, "copy")` | Copy of value | Use same value in multiple steps |
+
+**Important**: `arg.signer()` is for functions that take `&signer`. For functions that take `address` (like `primary_fungible_store::deposit`), use `arg.literal(address)` instead.
+
+**Important**: In Move, `FungibleAsset` does not have the `drop` ability. If a function returns a `FungibleAsset`, you must consume it in a subsequent step (e.g., deposit it). Unused non-droppable values will cause the transaction to fail.
+
+### JSON API (for AI Agents)
+
+AI agents can generate plans as JSON and execute them via `DynamicComposer.fromJSON()`:
 
 ```typescript
-// Simulate repaying more than you owe
-const badPlan = new SimulationPlanBuilder("Bad Repay Test")
-  .describe("Intentionally repay more than debt to test error detection")
-  .forWallet(client.address)
-  .trackTokens([USD1])
-  .addStep({
-    label: "repay",
-    description: "Repay all debt (but we have no debt)",
-    payload: echelon.buildRepayAllPayload(market),
-    expectations: [
-      { type: "success", description: "Transaction succeeds" },
+const result = await DynamicComposer.fromJSON(client, {
+  tokens: [
+    { symbol: "USDC", metadata: "0xbae207...", decimals: 6 },
+    { symbol: "USD1", metadata: "0x05fabd...", decimals: 6 },
+  ],
+  steps: [
+    {
+      label: "withdraw",
+      function: "0x1::primary_fungible_store::withdraw",
+      typeArguments: ["0x1::fungible_asset::Metadata"],
+      args: [
+        { kind: "signer" },
+        { kind: "literal", value: "0xbae207..." },
+        { kind: "literal", value: "205000000n" },
+      ],
+    },
+    {
+      label: "swap",
+      function: "0x8b4a...::pool_v3::swap",
+      args: [
+        { kind: "literal", value: "0x1609..." },
+        { kind: "literal", value: false },
+        { kind: "literal", value: true },
+        { kind: "literal", value: "205000000n" },
+        { kind: "ref", step: "withdraw", returnIndex: 0 },
+        { kind: "literal", value: "79226673515401279992447579055" },
+      ],
+    },
+    {
+      label: "deposit_remainder",
+      function: "0x1::primary_fungible_store::deposit",
+      args: [
+        { kind: "literal", value: "0x4c35..." },
+        { kind: "ref", step: "swap", returnIndex: 1 },
+      ],
+    },
+    {
+      label: "deposit_output",
+      function: "0x1::primary_fungible_store::deposit",
+      args: [
+        { kind: "literal", value: "0x4c35..." },
+        { kind: "ref", step: "swap", returnIndex: 2 },
+      ],
+    },
+  ],
+}).simulate();
+```
+
+**Bigint encoding**: JSON has no native bigint. Encode large numbers as strings with an `n` suffix: `"205000000n"` becomes `BigInt(205000000)`.
+
+### ComposedResult
+
+```typescript
+interface ComposedResult {
+  success: boolean;              // simulation passed?
+  simulation: SimulationResult;  // full parsed result (events, balance changes, gas)
+  transaction: AnyRawTransaction; // ready-to-sign transaction
+  balanceDiff: BalanceDiff | null; // before/after balance deltas (if tokens tracked)
+  errors: DiagnosedError[];      // actionable error diagnosis if failed
+  summary: string;               // pre-formatted human-readable report
+  stepLabels: string[];          // ordered step labels
+  execute(): Promise<ExecutionResult>; // sign + submit + wait
+}
+```
+
+## Example: Swap + Repay Debt + Withdraw Collateral
+
+A real-world DeFi flow using Hyperion DEX and Echelon Lending, all in one atomic transaction:
+
+```typescript
+const HYPERION = "0x8b4a2c4bb53857c718a04c020b98f8c2e1f99a68b0f57389a8bf5434cd22e05c";
+const ECHELON = "0xc6bc659f1649553c1a3fa05d9727433dc03843baac29473c817d06d39e7621ba";
+const POOL = "0x1609a6f6e914e60bf958d0e1ba24a471ee2bcadeca9e72659336a1f002be50db";
+const MARKET = "0xbb8f38636896c629ff9ef0bf916791a992e12ab4f1c6e26279ee9c6979646963";
+
+const result = await new DynamicComposer(client)
+  // Step 1: Withdraw USDC from wallet
+  .addStep("withdraw_usdc", {
+    function: "0x1::primary_fungible_store::withdraw",
+    typeArguments: ["0x1::fungible_asset::Metadata"],
+    args: [arg.signer(), arg.literal(USDC_META), arg.literal(205_000000n)],
+  })
+  // Step 2: Swap USDC → USD1 on Hyperion
+  .addStep("swap", {
+    function: `${HYPERION}::pool_v3::swap`,
+    args: [
+      arg.literal(POOL),
+      arg.literal(false),        // USDC is token_b, so b→a
+      arg.literal(true),         // exact_input
+      arg.literal(205_000000n),
+      arg.ref("withdraw_usdc", 0),
+      arg.literal("79226673515401279992447579055"),
     ],
   })
-  .build();
+  // Step 3: Deposit swap remainder back
+  .addStep("deposit_remainder", {
+    function: "0x1::primary_fungible_store::deposit",
+    args: [arg.literal(client.address), arg.ref("swap", 1)],
+  })
+  // Step 4: Repay debt with swap output
+  .addStep("repay", {
+    function: `${ECHELON}::lending::repay_fa`,
+    args: [arg.signer(), arg.literal(MARKET), arg.ref("swap", 2)],
+  })
+  // Step 5: Withdraw all collateral
+  .addStep("withdraw_collateral", {
+    function: `${ECHELON}::scripts::withdraw_all_fa`,
+    args: [arg.literal(MARKET)],
+  })
+  .trackTokens([USDC, USD1])
+  .simulate();
 
-const report = await dryRun(client, badPlan);
-
-// report.success === false
-// report.errors[0]:
-// {
-//   code: "ARITHMETIC_OVERFLOW",
-//   title: "Arithmetic overflow in contract",
-//   suggestion: "Check that repay amount <= outstanding debt. Verify swap amounts against pool liquidity."
-// }
-```
-
-### FlowReport Structure
-
-The `dryRun()` function returns a `FlowReport` with full programmatic access:
-
-```typescript
-interface FlowReport {
-  plan: SimulationPlan;           // the input plan
-  success: boolean;               // true if ALL steps passed
-  totalGasUsed: number;           // aggregate gas across all steps
-  totalGasCostApt: number;        // total gas in APT
-  initialSnapshot: BalanceSnapshot; // starting on-chain balances
-  stepResults: StepResult[];      // per-step: success, balances, deltas, events, errors
-  overallDiff: BalanceDiff;       // net change from start to finish
-  errors: DiagnosedError[];       // actionable error diagnosis for failed steps
-  warnings: DiagnosedError[];     // failed expectations that didn't cause step failure
-  summary: string;                // pre-formatted human-readable report
+if (result.success) {
+  console.log("All 5 steps simulated successfully in one atomic tx!");
+  const exec = await result.execute();
 }
 ```
 
-Each `StepResult` contains:
+## Single Transaction Simulate + Execute
+
+For simple single-function transactions, use `buildAndSimulate()` directly:
 
 ```typescript
-interface StepResult {
-  label: string;
-  success: boolean;
-  vmStatus: string;
-  gasUsed: number;
-  gasCostApt: number;
-  events: ParsedEvent[];           // all events emitted by this step
-  balancesAfter: Map<string, bigint>; // tracked token balances after this step
-  deltas: BalanceDelta[];          // per-token change from previous state
-  expectationResults: ExpectationResult[]; // pass/fail for each expectation
-  durationMs: number;              // wall-clock simulation time
-}
-```
+import { AptosClient, buildAndSimulate, executeTransaction } from "tx-composer";
 
-## Atomic Multi-Step Transactions
+const payload = {
+  function: "0x8b4a...::router_v3::swap_batch" as const,
+  typeArguments: [],
+  functionArguments: [pools, tokenIn, tokenOut, amountIn, minOut, recipient],
+};
 
-For operations that **must** succeed or fail together, compose them into a single atomic transaction using Script Composer. This is different from dry-run (which simulates separate transactions) — here everything executes in one tx.
+const { transaction, simulation } = await buildAndSimulate(client, payload);
 
-### Example: Swap + Repay in One Transaction
-
-```typescript
-import {
-  AptosClient,
-  composeActions,
-  simulateTransaction,
-  executeTransaction,
-  withdrawFromWallet,
-  depositToWallet,
-  HyperionAdapter,
-  EchelonAdapter,
-} from "tx-composer";
-
-const client = new AptosClient({
-  network: Network.MAINNET,
-  privateKey: process.env.APTOS_PRIVATE_KEY,
-});
-
-const hyperion = new HyperionAdapter();
-const echelon = new EchelonAdapter();
-
-const USDC_META = "0xbae207...";
-const pool = hyperion.getPool("USD1_USDC")!;
-const market = echelon.getMarket("USD1")!;
-
-// Compose: withdraw USDC → swap → repay debt — all atomic
-const { transaction, actionDescriptions } = await composeActions(client, [
-  {
-    label: "withdraw_usdc",
-    action: withdrawFromWallet(USDC_META, 205_000000n),
-  },
-  {
-    label: "swap",
-    action: hyperion.buildComposableSwap({
-      pool,
-      tokenIn: USDC,
-      tokenOut: USD1,
-      amountIn: 205_000000n,
-      faIn: null!, // wired from ctx.results["withdraw_usdc"][0] inside build()
-      aToB: false,
-    }),
-  },
-  {
-    label: "repay",
-    action: echelon.buildComposableRepay({
-      market,
-      faIn: null!, // wired from ctx.results["swap"][2] (output FA) inside build()
-    }),
-  },
-]);
-
-// Simulate the composed atomic transaction
-const sim = await simulateTransaction(client, transaction);
-console.log(`Composed TX: ${sim.success ? "OK" : "FAILED"}, Gas: ${sim.gasCostApt} APT`);
-
-// Execute if simulation passes
-if (sim.success && client.canExecute) {
-  const result = await executeTransaction(client, transaction, "Atomic swap + repay");
+if (simulation.success) {
+  const result = await executeTransaction(client, transaction, "Swap");
   console.log(`TX: ${result.hash}`);
 }
 ```
 
-### Wiring CallArguments Between Actions
-
-In composable actions, each action's `build()` receives a `ComposerContext`:
-
-```typescript
-interface ComposerContext {
-  composer: AptosScriptComposer;      // the script composer instance
-  results: Map<string, CallArgument[]>; // outputs from all prior actions
-  signer: CallArgument;               // reference to the transaction signer
-}
-```
-
-Actions reference prior results by label:
-
-```typescript
-// Custom composable action that uses output from "swap" step
-const myAction: ComposableAction = {
-  description: "Deposit swap output to wallet",
-  async build(ctx) {
-    const swapResults = ctx.results.get("swap")!;
-    const outputFA = swapResults[2]; // FungibleAsset output from Hyperion swap
-
-    return ctx.composer.addBatchedCalls({
-      function: "0x1::primary_fungible_store::deposit",
-      functionArguments: [ctx.signer, outputFA],
-      typeArguments: [],
-    });
-  },
-};
-```
-
 ## Simulation-Only Mode
 
-Pass just a public key (no private key) for safe simulation without execution capability:
+Pass just a public key for safe simulation without execution capability:
 
 ```typescript
 const client = new AptosClient({
@@ -389,31 +268,20 @@ const client = new AptosClient({
 });
 
 // client.canExecute === false
-// buildAndSimulate() works
-// dryRun() works
-// executeTransaction() throws "Cannot execute: no private key provided"
+// .simulate() works, .execute() throws
 ```
 
-This is the recommended mode for AI agents doing analysis — simulate freely without risk of accidental execution.
+Recommended for AI agents doing analysis.
 
 ## Error Diagnosis
-
-The `diagnoseVmStatus()` function pattern-matches Move VM error strings into actionable diagnostics:
 
 ```typescript
 import { diagnoseVmStatus } from "tx-composer";
 
-const errors = diagnoseVmStatus("Move abort: 0x10004 at 0xc6bc...::lending");
-// [{
-//   severity: "error",
-//   code: "LENDING_ERROR",
-//   title: "Lending protocol error",
-//   detail: "The lending protocol rejected the operation.",
-//   suggestion: "Check: repay amount <= debt, withdrawal won't breach health factor, position exists."
-// }]
+const errors = diagnoseVmStatus("Move abort at 0xc6bc...::lending");
+// [{ code: "LENDING_ERROR", title: "Lending protocol error",
+//    suggestion: "Check: repay amount <= debt, withdrawal won't breach health factor" }]
 ```
-
-Recognized error patterns:
 
 | Code | Matches | Suggestion |
 |------|---------|------------|
@@ -428,260 +296,126 @@ Recognized error patterns:
 | `DEX_POOL_ERROR` | `pool_v3`, `pool_v2` | Check slippage and pool liquidity |
 | `MOVE_ABORT` | `ABORTED` | Check abort code against protocol source |
 
-## Protocol Adapters
+## Protocol Adapters (Optional Convenience)
+
+Pre-built adapters for common protocols. These are optional — you can always use `DynamicComposer` directly with raw function calls.
 
 ### Hyperion DEX
 
 ```typescript
-import { HyperionAdapter, MAX_SQRT_PRICE_B_TO_A, MIN_SQRT_PRICE_A_TO_B } from "tx-composer";
+import { HyperionAdapter } from "tx-composer";
 
-const hyperion = new HyperionAdapter(); // default mainnet config
-// or with custom config:
-const hyperion = new HyperionAdapter({
-  address: "0x8b4a2c...",
-  pools: {
-    "USD1_USDC": "0x1609a6...",
-    "APT_USDC": "0xabc...",
-  },
-});
-
-// Get a swap quote (view function, no gas)
+const hyperion = new HyperionAdapter();
 const quote = await hyperion.getSwapQuote(client, USDC, USD1, 100_000000n, [pool]);
-
-// Build entry function payload (for standalone transactions)
-const payload = hyperion.buildSwapPayload({
-  pools: [pool],
-  tokenIn: USDC,
-  tokenOut: USD1,
-  amountIn: 100_000000n,
-  minAmountOut: 99_500000n,
-  recipient: client.address,
-});
-
-// Build composable action (for atomic multi-step)
-const action = hyperion.buildComposableSwap({
-  pool,
-  tokenIn: USDC,
-  tokenOut: USD1,
-  amountIn: 100_000000n,
-  faIn: callArgFromPriorStep,
-  aToB: false, // USDC → USD1 (b→a for this pool)
-  sqrtPriceLimit: MAX_SQRT_PRICE_B_TO_A, // default for b→a
-});
+const payload = hyperion.buildSwapPayload({ pools, tokenIn, tokenOut, amountIn, minAmountOut, recipient });
 ```
-
-**Pool ordering**: Hyperion V3 pools have a fixed token order (token_a, token_b). For USD1_USDC: token_a=USD1, token_b=USDC. So USDC→USD1 is `aToB: false`.
 
 ### Echelon Lending
 
 ```typescript
 import { EchelonAdapter } from "tx-composer";
 
-const echelon = new EchelonAdapter(); // default mainnet config
-
-// Get market address
-const market = echelon.getMarket("USD1")!;
-
-// Entry function payloads (standalone transactions)
+const echelon = new EchelonAdapter();
 const repayPayload = echelon.buildRepayAllPayload(market);
 const withdrawPayload = echelon.buildWithdrawAllPayload(market);
-
-// Composable actions (for atomic multi-step)
-const repayAction = echelon.buildComposableRepay({ market, faIn: debtTokenFA });
-const withdrawAction = echelon.buildComposableWithdraw({ market, amount: 252_000000n });
 ```
 
-### Adding a New Protocol Adapter
+## Sequential Dry-Run (Separate Transactions)
 
-Implement `DexAdapter` or `LendingAdapter`:
-
-```typescript
-import type {
-  DexAdapter,
-  EntryFunctionPayload,
-  ComposableAction,
-  TokenConfig,
-} from "tx-composer";
-import type { AptosClient } from "tx-composer";
-
-export class PancakeSwapAdapter implements DexAdapter {
-  readonly name = "PancakeSwap";
-  readonly address = "0x...";
-
-  async getSwapQuote(
-    client: AptosClient,
-    tokenIn: TokenConfig,
-    tokenOut: TokenConfig,
-    amountIn: bigint,
-    pools: string[],
-  ): Promise<bigint | null> {
-    // Call the protocol's view function to get an output quote
-    const result = await client.aptos.view({
-      payload: {
-        function: `${this.address}::router::get_amount_out`,
-        typeArguments: [],
-        functionArguments: [pools[0], amountIn.toString(), tokenIn.metadata],
-      },
-    });
-    return BigInt(result[0] as string);
-  }
-
-  buildSwapPayload(params: {
-    pools: string[];
-    tokenIn: TokenConfig;
-    tokenOut: TokenConfig;
-    amountIn: bigint;
-    minAmountOut: bigint;
-    recipient: string;
-  }): EntryFunctionPayload {
-    return {
-      function: `${this.address}::router::swap_exact_input`,
-      typeArguments: [],
-      functionArguments: [
-        params.pools[0],
-        params.tokenIn.metadata,
-        params.tokenOut.metadata,
-        params.amountIn.toString(),
-        params.minAmountOut.toString(),
-      ],
-    };
-  }
-
-  buildComposableSwap(params: { /* ... */ }): ComposableAction {
-    return {
-      description: `Swap via PancakeSwap`,
-      async build(ctx) {
-        return ctx.composer.addBatchedCalls({
-          function: `${this.address}::pool::swap`,
-          functionArguments: [params.pool, params.faIn, /* ... */],
-          typeArguments: [],
-        });
-      },
-    };
-  }
-}
-```
-
-Then use it with the simulation engine:
+For simulating separate transactions in sequence (not atomic), use `SimulationPlanBuilder`:
 
 ```typescript
-const pancake = new PancakeSwapAdapter();
+import { SimulationPlanBuilder, dryRun } from "tx-composer";
 
-const plan = new SimulationPlanBuilder("PancakeSwap Trade")
+const plan = new SimulationPlanBuilder("My Flow")
   .forWallet(client.address)
-  .trackTokens([APT, USDC])
+  .trackTokens([USDC, USD1])
   .addStep({
     label: "swap",
-    description: "Swap APT → USDC",
-    payload: pancake.buildSwapPayload({ /* ... */ }),
+    description: "Swap USDC → USD1",
+    payload: swapPayload,
     expectations: [
-      { type: "balance_increase", token: USDC.metadata, description: "USDC received" },
+      { type: "balance_decrease", token: USDC.metadata, description: "USDC spent" },
+      { type: "balance_increase", token: USD1.metadata, description: "USD1 received" },
     ],
+  })
+  .addStep({
+    label: "repay",
+    description: "Repay debt",
+    payload: repayPayload,
   })
   .build();
 
 const report = await dryRun(client, plan);
+console.log(report.summary);
 ```
 
+**Note**: Each step simulates independently against current mainnet state. Step 2 doesn't see step 1's changes. For accurate multi-step simulation, use `DynamicComposer` which composes everything atomically.
+
 ## API Reference
+
+### DynamicComposer
+
+| Method | Description |
+|--------|------------|
+| `new DynamicComposer(client)` | Create a composer for the given client |
+| `.addStep(label, { function, typeArguments?, args })` | Add a Move function call |
+| `.trackTokens(tokens[])` | Track balance changes for these tokens |
+| `.build()` | Build the composed transaction |
+| `.simulate()` | Build + simulate + parse into `ComposedResult` |
+| `DynamicComposer.fromJSON(client, json)` | Construct from a JSON plan |
+
+### arg Helpers
+
+| Helper | Description |
+|--------|------------|
+| `arg.signer()` | Reference to transaction signer (`&signer` params) |
+| `arg.literal(value)` | Literal value (string, number, bigint, boolean) |
+| `arg.ref(step, returnIndex, mode?)` | Reference to a prior step's return value |
 
 ### Core
 
 | Export | Description |
 |--------|------------|
-| `AptosClient` | Wrapper with wallet management. Accepts `privateKey` (full) or `publicKey` (sim-only) |
-| `getFABalance(aptos, owner, metadata)` | Query a single fungible asset balance |
-| `getFABalanceSafe(aptos, owner, metadata)` | Same but returns `{ balance, error? }` instead of swallowing errors |
+| `AptosClient` | Wallet management with `privateKey` (full) or `publicKey` (sim-only) modes |
+| `getFABalance(aptos, owner, metadata)` | Query fungible asset balance |
+| `getFABalanceSafe(aptos, owner, metadata)` | Same but returns `{ balance, error? }` |
 | `getBalances(aptos, owner, tokens[])` | Parallel multi-token balance query |
 | `formatAmount(raw, decimals)` | Format raw bigint to human-readable string |
-
-### Transactions
-
-| Export | Description |
-|--------|------------|
-| `buildTransaction(client, payload)` | Build a transaction from an entry function payload |
-| `simulateTransaction(client, tx, tokenRegistry?)` | Simulate and parse results |
-| `executeTransaction(client, tx, description?)` | Sign, submit, and wait for confirmation |
-| `buildAndSimulate(client, payload, tokenRegistry?)` | Build + simulate in one call |
-
-### Composition
-
-| Export | Description |
-|--------|------------|
-| `composeActions(client, actions[])` | Compose multiple actions into a single atomic transaction |
-| `withdrawFromWallet(metadata, amount)` | Composable: withdraw FA from signer's store |
-| `depositToWallet(recipient, faArgument)` | Composable: deposit FA to recipient |
-
-### Simulation Engine
-
-| Export | Description |
-|--------|------------|
-| `SimulationPlanBuilder` | Fluent builder for multi-step simulation plans |
-| `dryRun(client, plan)` | Execute a simulation plan and return a FlowReport |
-| `formatFlowReport(report)` | Format a FlowReport as human-readable text |
-| `diagnoseVmStatus(vmStatus, stepLabel?)` | Diagnose VM errors into actionable messages |
-| `captureSnapshot(aptos, owner, tokens[])` | Capture current on-chain balances |
-| `extractBalancesFromSimulation(raw, tokens, owner)` | Extract balances from simulation WriteSetChanges |
-| `extractVaultFromSimulation(raw, protocolAddr)` | Extract vault state from simulation |
-| `computeDeltas(before, after, tokens)` | Compute per-token balance deltas |
-| `computeDiff(before, after, tokens, vaultBefore?, vaultAfter?)` | Full balance diff |
-| `validateExpectations(expectations, deltas, vaultBefore?, vaultAfter?)` | Check step expectations |
-
-### Simulation Types
-
-```typescript
-import type {
-  SimulationPlan,        // plan definition
-  PlanStep,              // a step in the plan
-  StepExpectation,       // expected outcome for a step
-  ExpectationType,       // "balance_increase" | "balance_decrease" | "vault_debt_decrease" | ...
-  FlowReport,            // full dry-run result
-  StepResult,            // per-step simulation result
-  BalanceSnapshot,       // point-in-time balance state
-  BalanceDelta,          // single token's change
-  BalanceDiff,           // full balance comparison
-  VaultSnapshot,         // lending vault state
-  DiagnosedError,        // actionable error diagnosis
-  ExpectationResult,     // pass/fail for an expectation
-} from "tx-composer";
-```
+| `buildAndSimulate(client, payload)` | Build + simulate a single entry function |
+| `executeTransaction(client, tx, description?)` | Sign, submit, and wait |
+| `diagnoseVmStatus(vmStatus)` | Diagnose VM errors into actionable messages |
 
 ## Architecture
 
 ```
 tx-composer/
+├── dynamic/
+│   ├── types.ts       # StepArg, ComposerStep, ComposedResult, DynamicPlanJSON
+│   ├── composer.ts    # DynamicComposer class
+│   └── report.ts      # Composed simulation report formatter
 ├── core/
-│   ├── client.ts          # AptosClient (wallet management, dual-mode)
-│   ├── balance.ts         # FA balance queries
-│   └── transaction.ts     # build, simulate, execute
+│   ├── client.ts      # AptosClient (wallet management, dual-mode)
+│   ├── balance.ts     # FA balance queries
+│   └── transaction.ts # build, simulate, execute
 ├── composer/
-│   ├── composer.ts        # Script Composer atomic transactions
-│   └── helpers.ts         # withdraw/deposit composable actions
+│   ├── composer.ts    # Low-level Script Composer wrapper
+│   └── helpers.ts     # withdraw/deposit composable actions
 ├── protocols/
-│   ├── protocol.ts        # DexAdapter / LendingAdapter interfaces
-│   ├── hyperion/          # Hyperion DEX adapter
-│   └── echelon/           # Echelon lending adapter
+│   ├── protocol.ts    # DexAdapter / LendingAdapter interfaces
+│   ├── hyperion/      # Hyperion DEX adapter (optional)
+│   └── echelon/       # Echelon lending adapter (optional)
 ├── simulation/
-│   ├── types.ts           # SimulationPlan, FlowReport, StepResult, etc.
-│   ├── simulate.ts        # Parse simulation responses (events, balances, vaults)
-│   ├── plan.ts            # SimulationPlanBuilder + dryRun() executor
-│   ├── report.ts          # Human-readable report formatter
-│   ├── flow-tracker.ts    # Balance snapshots, diffs, expectation validation
-│   ├── errors.ts          # VM error → actionable diagnosis
-│   └── forklift.ts        # Forklift state fork reader (optional)
-├── types.ts               # Core type definitions
-└── index.ts               # Public API exports
+│   ├── types.ts       # SimulationPlan, FlowReport, StepResult, etc.
+│   ├── simulate.ts    # Parse simulation responses
+│   ├── plan.ts        # SimulationPlanBuilder + dryRun()
+│   ├── report.ts      # Sequential dry-run report formatter
+│   ├── flow-tracker.ts # Balance snapshots, diffs, expectation validation
+│   ├── errors.ts      # VM error → actionable diagnosis
+│   └── forklift.ts    # Forklift state fork reader (optional)
+├── types.ts           # Core type definitions
+└── index.ts           # Public API exports (33 exports)
 ```
-
-## Known Limitations
-
-1. **Sequential simulation caveat**: Each step in `dryRun()` simulates against the current mainnet state independently. Step 2 doesn't see Step 1's state changes. The balance carry-forward is approximated from simulation WriteSetChanges. For fully accurate sequential simulation, use Forklift with state forking (see roadmap).
-
-2. **Protocol coverage**: Currently supports Hyperion DEX (swaps) and Echelon Lending (repay/withdraw). Deposit, borrow, and liquidation operations are not yet implemented.
-
-3. **Single-pool swaps only**: Hyperion adapter supports single-pool swaps. Multi-hop routing across multiple pools is not yet supported.
-
-4. **Single vault tracking**: The dry-run engine tracks one vault (market) per plan. Multi-market positions require separate plans.
 
 ## Dependencies
 
@@ -690,7 +424,7 @@ tx-composer/
 | `@aptos-labs/ts-sdk` | Yes | Core Aptos SDK |
 | `@aptos-labs/script-composer-sdk` | Yes | Atomic transaction composition |
 | `@aptos-labs/script-composer-pack` | Yes | WASM pack for script composer |
-| `@aptos-labs/forklift` | Optional | State forking for accurate sequential simulation |
+| `@aptos-labs/forklift` | Optional | State forking for sequential simulation |
 
 ## License
 
