@@ -6,18 +6,98 @@ import type {
   VaultChange,
 } from "../types.js";
 
+// ── Type Guards ────────────────────────────────────────────────────
+
+interface FungibleStoreChange {
+  type: "write_resource";
+  address: string;
+  data: {
+    type: string;
+    data: {
+      balance: string;
+      frozen: boolean;
+      metadata: { inner: string };
+    };
+  };
+}
+
+interface VaultWriteChange {
+  type: "write_resource";
+  address: string;
+  data: {
+    type: string;
+    data: {
+      collaterals?: { data: Array<{ key: string; value: string }> };
+      liabilities?: {
+        data: Array<{ key: string; value: { principal: string } }>;
+      };
+    };
+  };
+}
+
+interface VaultDeleteChange {
+  type: "delete_resource";
+  address: string;
+  resource: string;
+}
+
+function isFungibleStoreChange(change: unknown): change is FungibleStoreChange {
+  const c = change as Record<string, unknown>;
+  if (c?.type !== "write_resource") return false;
+  const data = c.data as Record<string, unknown> | undefined;
+  if (!data || typeof data.type !== "string") return false;
+  if (!data.type.includes("FungibleStore")) return false;
+  const inner = data.data as Record<string, unknown> | undefined;
+  return (
+    inner?.balance != null &&
+    typeof (inner?.metadata as Record<string, unknown>)?.inner === "string"
+  );
+}
+
+function isVaultWriteChange(change: unknown): change is VaultWriteChange {
+  const c = change as Record<string, unknown>;
+  if (c?.type !== "write_resource") return false;
+  const data = c.data as Record<string, unknown> | undefined;
+  if (!data || typeof data.type !== "string") return false;
+  return data.type.includes("lending::Vault");
+}
+
+function isVaultDeleteChange(change: unknown): change is VaultDeleteChange {
+  const c = change as Record<string, unknown>;
+  return (
+    c?.type === "delete_resource" &&
+    typeof c?.resource === "string" &&
+    (c.resource as string).includes("Vault")
+  );
+}
+
+// ── Access Helpers ─────────────────────────────────────────────────
+
+function getResponseField(raw: UserTransactionResponse, field: string): string {
+  return (raw as Record<string, unknown>)[field] as string ?? "";
+}
+
+function getResponseChanges(raw: UserTransactionResponse): unknown[] {
+  return ((raw as Record<string, unknown>).changes as unknown[]) ?? [];
+}
+
+function getResponseEvents(raw: UserTransactionResponse): Array<Record<string, unknown>> {
+  return ((raw as Record<string, unknown>).events as Array<Record<string, unknown>>) ?? [];
+}
+
+// ── Main Parser ───────────────────────────────────────────────────
+
 export function parseSimulationResult(
   raw: UserTransactionResponse,
   tokenRegistry?: Map<string, string>,
 ): SimulationResult {
-  const r = raw as any;
-  const gasUsed = parseInt(r.gas_used ?? "0");
-  const gasUnitPrice = parseInt(r.gas_unit_price ?? "100");
+  const gasUsed = parseInt(getResponseField(raw, "gas_used") || "0");
+  const gasUnitPrice = parseInt(getResponseField(raw, "gas_unit_price") || "100");
   const gasCostApt = (gasUsed * gasUnitPrice) / 1e8;
 
   return {
     success: raw.success,
-    vmStatus: r.vm_status ?? "",
+    vmStatus: getResponseField(raw, "vm_status"),
     gasUsed,
     gasUnitPrice,
     gasCostApt,
@@ -30,12 +110,17 @@ export function parseSimulationResult(
 
 function parseEvents(raw: UserTransactionResponse): ParsedEvent[] {
   const result: ParsedEvent[] = [];
-  for (const evt of (raw as any).events ?? []) {
-    const fullType: string = evt.type ?? "";
+  for (const evt of getResponseEvents(raw)) {
+    const fullType = (evt.type as string) ?? "";
     const segments = fullType.split("::");
     const shortType = segments.slice(-2).join("::");
-    const amount = evt.data?.amount ? BigInt(evt.data.amount) : undefined;
-    result.push({ type: fullType, shortType, amount, data: evt.data ?? {} });
+    const data = (evt.data as Record<string, unknown>) ?? {};
+    const amountRaw = data.amount;
+    const amount =
+      amountRaw != null && String(amountRaw) !== "0"
+        ? BigInt(String(amountRaw))
+        : undefined;
+    result.push({ type: fullType, shortType, amount, data });
   }
   return result;
 }
@@ -46,11 +131,7 @@ function resolveTokenSymbol(
 ): string {
   if (!registry) return metadata.slice(0, 10) + "...";
   for (const [addr, sym] of registry) {
-    if (
-      metadata.toLowerCase().includes(addr.slice(2, 8).toLowerCase())
-    ) {
-      return sym;
-    }
+    if (metadata.toLowerCase() === addr.toLowerCase()) return sym;
   }
   return metadata.slice(0, 10) + "...";
 }
@@ -60,20 +141,13 @@ function parseBalanceChanges(
   tokenRegistry?: Map<string, string>,
 ): BalanceChange[] {
   const result: BalanceChange[] = [];
-  for (const change of (raw as any).changes ?? []) {
-    if (change.type !== "write_resource") continue;
-    const resType: string = change.data?.type ?? "";
-    if (!resType.includes("FungibleStore")) continue;
-
-    const balance = change.data?.data?.balance;
-    const metadata: string = change.data?.data?.metadata?.inner ?? "";
-    if (balance == null) continue;
-
+  for (const change of getResponseChanges(raw)) {
+    if (!isFungibleStoreChange(change)) continue;
     result.push({
-      address: change.address ?? "",
-      token: resolveTokenSymbol(metadata, tokenRegistry),
-      tokenMetadata: metadata,
-      balance: BigInt(balance),
+      address: change.address,
+      token: resolveTokenSymbol(change.data.data.metadata.inner, tokenRegistry),
+      tokenMetadata: change.data.data.metadata.inner,
+      balance: BigInt(change.data.data.balance),
     });
   }
   return result;
@@ -81,28 +155,30 @@ function parseBalanceChanges(
 
 function parseVaultChanges(raw: UserTransactionResponse): VaultChange[] {
   const result: VaultChange[] = [];
-  for (const change of (raw as any).changes ?? []) {
-    if (
-      change.type === "delete_resource" &&
-      (change.resource ?? "").includes("Vault")
-    ) {
-      result.push({ address: change.address ?? "", collateral: 0n, debtPrincipal: 0n });
+  for (const change of getResponseChanges(raw)) {
+    if (isVaultDeleteChange(change)) {
+      result.push({ address: change.address, collateral: 0n, debtPrincipal: 0n });
       continue;
     }
-    if (change.type !== "write_resource") continue;
-    const resType: string = change.data?.type ?? "";
-    if (!resType.includes("lending::Vault")) continue;
+    if (!isVaultWriteChange(change)) continue;
 
-    const vault = change.data?.data;
-    if (!vault) continue;
+    const vaultData = change.data.data;
+    let collateral = 0n;
+    let debtPrincipal = 0n;
 
-    result.push({
-      address: change.address ?? "",
-      collateral: BigInt(vault.collaterals?.data?.[0]?.value ?? "0"),
-      debtPrincipal: BigInt(
-        vault.liabilities?.data?.[0]?.value?.principal ?? "0",
-      ),
-    });
+    if (vaultData.collaterals?.data) {
+      for (const entry of vaultData.collaterals.data) {
+        collateral += BigInt(entry.value ?? "0");
+      }
+    }
+
+    if (vaultData.liabilities?.data) {
+      for (const entry of vaultData.liabilities.data) {
+        debtPrincipal += BigInt(entry.value?.principal ?? "0");
+      }
+    }
+
+    result.push({ address: change.address, collateral, debtPrincipal });
   }
   return result;
 }

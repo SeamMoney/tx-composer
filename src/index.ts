@@ -1,6 +1,11 @@
 // Core
 export { AptosClient } from "./core/client.js";
-export { getFABalance, getBalances, formatAmount } from "./core/balance.js";
+export {
+  getFABalance,
+  getFABalanceSafe,
+  getBalances,
+  formatAmount,
+} from "./core/balance.js";
 export {
   buildTransaction,
   simulateTransaction,
@@ -30,11 +35,24 @@ export { EchelonAdapter } from "./protocols/echelon/index.js";
 export { DEFAULT_ECHELON_CONFIG } from "./protocols/echelon/index.js";
 export type { EchelonConfig } from "./protocols/echelon/index.js";
 
-// Simulation
+// Simulation — parsing
 export { parseSimulationResult } from "./simulation/simulate.js";
 export { ForkliftReader } from "./simulation/forklift.js";
 
-// Types
+// Simulation — flow engine
+export { SimulationPlanBuilder, dryRun } from "./simulation/plan.js";
+export { formatFlowReport } from "./simulation/report.js";
+export { diagnoseVmStatus } from "./simulation/errors.js";
+export {
+  captureSnapshot,
+  extractBalancesFromSimulation,
+  extractVaultFromSimulation,
+  computeDeltas,
+  computeDiff,
+  validateExpectations,
+} from "./simulation/flow-tracker.js";
+
+// Types — core
 export type {
   ToolkitConfig,
   TokenConfig,
@@ -47,3 +65,20 @@ export type {
   ComposableAction,
   ComposerContext,
 } from "./types.js";
+
+// Types — simulation engine
+export type {
+  BalanceSnapshot,
+  VaultSnapshot,
+  BalanceDelta,
+  BalanceDiff,
+  PlanStep,
+  StepExpectation,
+  ExpectationType,
+  SimulationPlan,
+  StepResult,
+  ExpectationResult,
+  ErrorSeverity,
+  DiagnosedError,
+  FlowReport,
+} from "./simulation/types.js";
