@@ -33,8 +33,7 @@
   "dependencies": {
     "@aptos-labs/script-composer-pack": "^0.2.1",
     "@aptos-labs/script-composer-sdk": "^0.3.2",
-    "@aptos-labs/ts-sdk": "^5.2.1",
-    "got": "^14.6.6"
+    "@aptos-labs/ts-sdk": "^5.2.1"
   },
   "peerDependencies": {
     "@aptos-labs/forklift": "^1.0.1"

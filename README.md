@@ -49,20 +49,23 @@ const client = new AptosClient({
 const USDC_META = "0xbae207659db88bea0cbead6da0ed00aac12edcdda169e591cd41c94180b46f3b";
 const USD1_META = "0x05fabd1b12e39967a3c24e91b7b8f67719a6dacee74f3c8b9fb7d93e855437d2";
 
+const HYPERION = "0x8b4a2c4bb53857c718a04c020b98f8c2e1f99a68b0f57389a8bf5434cd22e05c";
+const POOL = "0x1609a6f6e914e60bf958d0e1ba24a471ee2bcadeca9e72659336a1f002be50db";
+
 const result = await new DynamicComposer(client)
   .addStep("withdraw", {
     function: "0x1::primary_fungible_store::withdraw",
     typeArguments: ["0x1::fungible_asset::Metadata"],
-    args: [arg.signer(), arg.literal(USDC_META), arg.literal(205_000000n)],
+    args: [arg.signer(), arg.literal(USDC_META), arg.literal(1_000000n)],
   })
   .addStep("swap", {
-    function: "0x8b4a...::pool_v3::swap",
+    function: `${HYPERION}::pool_v3::swap`,
     args: [
-      arg.literal("0x1609..."),          // pool address
-      arg.literal(false),                // a_to_b
-      arg.literal(true),                 // exact_input
-      arg.literal(205_000000n),          // amount
-      arg.ref("withdraw", 0),            // FungibleAsset from step "withdraw", return[0]
+      arg.literal(POOL),               // pool address
+      arg.literal(false),              // a_to_b
+      arg.literal(true),              // exact_input
+      arg.literal(1_000000n),         // amount
+      arg.ref("withdraw", 0),         // FungibleAsset from step "withdraw", return[0]
       arg.literal("79226673515401279992447579055"), // sqrt_price_limit
     ],
   })
@@ -135,58 +138,239 @@ All steps succeed or all revert — it's a single atomic transaction.
 
 ### JSON API (for AI Agents)
 
-AI agents can generate plans as JSON and execute them via `DynamicComposer.fromJSON()`:
+AI agents generate transaction plans as JSON. The host application passes them to `DynamicComposer.fromJSON()` for simulation and execution.
 
-```typescript
-const result = await DynamicComposer.fromJSON(client, {
-  tokens: [
-    { symbol: "USDC", metadata: "0xbae207...", decimals: 6 },
-    { symbol: "USD1", metadata: "0x05fabd...", decimals: 6 },
-  ],
-  steps: [
-    {
-      label: "withdraw",
-      function: "0x1::primary_fungible_store::withdraw",
-      typeArguments: ["0x1::fungible_asset::Metadata"],
-      args: [
-        { kind: "signer" },
-        { kind: "literal", value: "0xbae207..." },
-        { kind: "literal", value: "205000000n" },
-      ],
+#### JSON Schema
+
+```json
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "required": ["steps"],
+  "properties": {
+    "tokens": {
+      "type": "array",
+      "description": "Tokens to track balance changes for. Optional but recommended.",
+      "items": {
+        "type": "object",
+        "required": ["symbol", "metadata", "decimals"],
+        "properties": {
+          "symbol": { "type": "string", "description": "Human-readable token symbol (e.g. \"USDC\")" },
+          "metadata": { "type": "string", "description": "On-chain fungible asset metadata address (0x-prefixed, 64 hex chars)" },
+          "decimals": { "type": "integer", "description": "Token decimal places (e.g. 6 for USDC, 8 for APT)" }
+        }
+      }
     },
-    {
-      label: "swap",
-      function: "0x8b4a...::pool_v3::swap",
-      args: [
-        { kind: "literal", value: "0x1609..." },
-        { kind: "literal", value: false },
-        { kind: "literal", value: true },
-        { kind: "literal", value: "205000000n" },
-        { kind: "ref", step: "withdraw", returnIndex: 0 },
-        { kind: "literal", value: "79226673515401279992447579055" },
-      ],
-    },
-    {
-      label: "deposit_remainder",
-      function: "0x1::primary_fungible_store::deposit",
-      args: [
-        { kind: "literal", value: "0x4c35..." },
-        { kind: "ref", step: "swap", returnIndex: 1 },
-      ],
-    },
-    {
-      label: "deposit_output",
-      function: "0x1::primary_fungible_store::deposit",
-      args: [
-        { kind: "literal", value: "0x4c35..." },
-        { kind: "ref", step: "swap", returnIndex: 2 },
-      ],
-    },
-  ],
-}).simulate();
+    "steps": {
+      "type": "array",
+      "minItems": 1,
+      "description": "Ordered list of Move function calls to compose atomically.",
+      "items": {
+        "type": "object",
+        "required": ["label", "function", "args"],
+        "properties": {
+          "label": { "type": "string", "description": "Unique step identifier. Used by ref args to wire return values between steps." },
+          "function": { "type": "string", "pattern": "^0x[a-fA-F0-9]+::[a-zA-Z_][a-zA-Z0-9_]*::[a-zA-Z_][a-zA-Z0-9_]*$", "description": "Fully qualified Move function: {address}::{module}::{function}" },
+          "typeArguments": { "type": "array", "items": { "type": "string" }, "description": "Move type arguments (e.g. [\"0x1::fungible_asset::Metadata\"]). Omit if none." },
+          "args": {
+            "type": "array",
+            "description": "Function arguments in parameter order.",
+            "items": {
+              "oneOf": [
+                {
+                  "type": "object",
+                  "required": ["kind"],
+                  "properties": { "kind": { "const": "signer" } },
+                  "description": "Transaction signer. Use for &signer parameters only."
+                },
+                {
+                  "type": "object",
+                  "required": ["kind", "value"],
+                  "properties": {
+                    "kind": { "const": "literal" },
+                    "value": { "oneOf": [{ "type": "string" }, { "type": "number" }, { "type": "boolean" }] }
+                  },
+                  "description": "Literal value. Strings ending in 'n' are parsed as bigint (e.g. \"1000000n\"). Use for address, u64, u128, bool, etc."
+                },
+                {
+                  "type": "object",
+                  "required": ["kind", "step", "returnIndex"],
+                  "properties": {
+                    "kind": { "const": "ref" },
+                    "step": { "type": "string", "description": "Label of the prior step whose return value to use." },
+                    "returnIndex": { "type": "integer", "minimum": 0, "description": "Index into the step's return values (0-based)." },
+                    "mode": { "type": "string", "enum": ["move", "copy", "borrow", "borrow_mut"], "default": "move", "description": "How to pass the value. Default \"move\" consumes it." }
+                  },
+                  "description": "Reference to a prior step's return value. This is how you wire outputs between steps."
+                }
+              ]
+            }
+          }
+        }
+      }
+    }
+  }
+}
 ```
 
-**Bigint encoding**: JSON has no native bigint. Encode large numbers as strings with an `n` suffix: `"205000000n"` becomes `BigInt(205000000)`.
+#### Field reference
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `tokens` | `TokenConfig[]` | No | Tokens to track balance changes for |
+| `tokens[].symbol` | `string` | Yes | Display name (e.g. `"USDC"`) |
+| `tokens[].metadata` | `string` | Yes | On-chain metadata address (`0x...`, 64 hex chars) |
+| `tokens[].decimals` | `integer` | Yes | Decimal places (6 for USDC, 8 for APT) |
+| `steps` | `Step[]` | Yes | Ordered Move function calls (min 1) |
+| `steps[].label` | `string` | Yes | Unique ID, referenced by `ref` args |
+| `steps[].function` | `string` | Yes | `{address}::{module}::{function}` |
+| `steps[].typeArguments` | `string[]` | No | Move type args (omit if none) |
+| `steps[].args` | `Arg[]` | Yes | Arguments in parameter order |
+
+**Arg types:**
+
+| `kind` | Fields | Use when |
+|--------|--------|----------|
+| `"signer"` | (none) | Parameter type is `&signer` |
+| `"literal"` | `value: string \| number \| boolean` | Parameter is `address`, `u64`, `u128`, `bool`, etc. Append `n` for bigint strings: `"1000000n"` |
+| `"ref"` | `step: string`, `returnIndex: number`, `mode?: string` | Consuming a return value from a prior step. Default mode is `"move"` (consumes the value) |
+
+#### Rules for agents
+
+1. **`&signer` vs `address`**: If the Move function takes `&signer`, use `{ "kind": "signer" }`. If it takes `address`, use `{ "kind": "literal", "value": "<wallet-address>" }`. Getting this wrong is the most common mistake.
+2. **Non-droppable returns must be consumed**: `FungibleAsset` does not have the `drop` ability. If a step returns one, a later step must consume it via `ref` (e.g. deposit it). Unconsumed non-droppable values revert the transaction.
+3. **Step order matters**: Steps execute in array order. A `ref` can only reference a step that appears earlier in the array.
+4. **Bigint encoding**: JSON has no native bigint. Encode large numbers as strings with an `n` suffix: `"1000000n"` becomes `BigInt(1000000)`.
+
+#### Example: Simple swap (USDC → USD1)
+
+Withdraw USDC from wallet, swap on Hyperion DEX, deposit both outputs back.
+
+```json
+{
+  "tokens": [
+    { "symbol": "USDC", "metadata": "0xbae207659db88bea0cbead6da0ed00aac12edcdda169e591cd41c94180b46f3b", "decimals": 6 },
+    { "symbol": "USD1", "metadata": "0x05fabd1b12e39967a3c24e91b7b8f67719a6dacee74f3c8b9fb7d93e855437d2", "decimals": 6 }
+  ],
+  "steps": [
+    {
+      "label": "withdraw",
+      "function": "0x1::primary_fungible_store::withdraw",
+      "typeArguments": ["0x1::fungible_asset::Metadata"],
+      "args": [
+        { "kind": "signer" },
+        { "kind": "literal", "value": "0xbae207659db88bea0cbead6da0ed00aac12edcdda169e591cd41c94180b46f3b" },
+        { "kind": "literal", "value": "1000000n" }
+      ]
+    },
+    {
+      "label": "swap",
+      "function": "0x8b4a2c4bb53857c718a04c020b98f8c2e1f99a68b0f57389a8bf5434cd22e05c::pool_v3::swap",
+      "args": [
+        { "kind": "literal", "value": "0x1609a6f6e914e60bf958d0e1ba24a471ee2bcadeca9e72659336a1f002be50db" },
+        { "kind": "literal", "value": false },
+        { "kind": "literal", "value": true },
+        { "kind": "literal", "value": "1000000n" },
+        { "kind": "ref", "step": "withdraw", "returnIndex": 0 },
+        { "kind": "literal", "value": "79226673515401279992447579055" }
+      ]
+    },
+    {
+      "label": "deposit_remainder",
+      "function": "0x1::primary_fungible_store::deposit",
+      "args": [
+        { "kind": "literal", "value": "<your-wallet-address>" },
+        { "kind": "ref", "step": "swap", "returnIndex": 1 }
+      ]
+    },
+    {
+      "label": "deposit_output",
+      "function": "0x1::primary_fungible_store::deposit",
+      "args": [
+        { "kind": "literal", "value": "<your-wallet-address>" },
+        { "kind": "ref", "step": "swap", "returnIndex": 2 }
+      ]
+    }
+  ]
+}
+```
+
+#### Example: Swap + repay loan + withdraw collateral
+
+A 5-step DeFi flow: withdraw USDC, swap to USD1 on Hyperion, deposit leftover USDC, repay Echelon lending debt with USD1, withdraw collateral.
+
+```json
+{
+  "tokens": [
+    { "symbol": "USDC", "metadata": "0xbae207659db88bea0cbead6da0ed00aac12edcdda169e591cd41c94180b46f3b", "decimals": 6 },
+    { "symbol": "USD1", "metadata": "0x05fabd1b12e39967a3c24e91b7b8f67719a6dacee74f3c8b9fb7d93e855437d2", "decimals": 6 }
+  ],
+  "steps": [
+    {
+      "label": "withdraw_usdc",
+      "function": "0x1::primary_fungible_store::withdraw",
+      "typeArguments": ["0x1::fungible_asset::Metadata"],
+      "args": [
+        { "kind": "signer" },
+        { "kind": "literal", "value": "0xbae207659db88bea0cbead6da0ed00aac12edcdda169e591cd41c94180b46f3b" },
+        { "kind": "literal", "value": "205000000n" }
+      ]
+    },
+    {
+      "label": "swap",
+      "function": "0x8b4a2c4bb53857c718a04c020b98f8c2e1f99a68b0f57389a8bf5434cd22e05c::pool_v3::swap",
+      "args": [
+        { "kind": "literal", "value": "0x1609a6f6e914e60bf958d0e1ba24a471ee2bcadeca9e72659336a1f002be50db" },
+        { "kind": "literal", "value": false },
+        { "kind": "literal", "value": true },
+        { "kind": "literal", "value": "205000000n" },
+        { "kind": "ref", "step": "withdraw_usdc", "returnIndex": 0 },
+        { "kind": "literal", "value": "79226673515401279992447579055" }
+      ]
+    },
+    {
+      "label": "deposit_remainder",
+      "function": "0x1::primary_fungible_store::deposit",
+      "args": [
+        { "kind": "literal", "value": "<your-wallet-address>" },
+        { "kind": "ref", "step": "swap", "returnIndex": 1 }
+      ]
+    },
+    {
+      "label": "repay_debt",
+      "function": "0xc6bc659f1649553c1a3fa05d9727433dc03843baac29473c817d06d39e7621ba::lending::repay_fa",
+      "args": [
+        { "kind": "signer" },
+        { "kind": "literal", "value": "0xbb8f38636896c629ff9ef0bf916791a992e12ab4f1c6e26279ee9c6979646963" },
+        { "kind": "ref", "step": "swap", "returnIndex": 2 }
+      ]
+    },
+    {
+      "label": "withdraw_collateral",
+      "function": "0xc6bc659f1649553c1a3fa05d9727433dc03843baac29473c817d06d39e7621ba::scripts::withdraw_all_fa",
+      "args": [
+        { "kind": "literal", "value": "0xbb8f38636896c629ff9ef0bf916791a992e12ab4f1c6e26279ee9c6979646963" }
+      ]
+    }
+  ]
+}
+```
+
+#### Usage in TypeScript
+
+```typescript
+import { AptosClient, DynamicComposer } from "tx-composer";
+import { Network } from "@aptos-labs/ts-sdk";
+
+const client = new AptosClient({ network: Network.MAINNET, privateKey: process.env.APTOS_PRIVATE_KEY });
+const plan = JSON.parse(agentOutput); // the JSON above
+const result = await DynamicComposer.fromJSON(client, plan).simulate();
+
+if (result.success) {
+  console.log(result.summary);
+  const exec = await result.execute();
+}
+```
 
 ### ComposedResult
 
@@ -197,6 +381,7 @@ interface ComposedResult {
   transaction: AnyRawTransaction; // ready-to-sign transaction
   balanceDiff: BalanceDiff | null; // before/after balance deltas (if tokens tracked)
   errors: DiagnosedError[];      // actionable error diagnosis if failed
+  warnings: ValidationWarning[]; // ABI validation warnings (signer mismatch, unconsumed resources, etc.)
   summary: string;               // pre-formatted human-readable report
   stepLabels: string[];          // ordered step labels
   execute(): Promise<ExecutionResult>; // sign + submit + wait
@@ -321,7 +506,7 @@ For simple single-function transactions, use `buildAndSimulate()` directly:
 import { AptosClient, buildAndSimulate, executeTransaction } from "tx-composer";
 
 const payload = {
-  function: "0x8b4a...::router_v3::swap_batch" as const,
+  function: "0x8b4a2c4bb53857c718a04c020b98f8c2e1f99a68b0f57389a8bf5434cd22e05c::router_v3::swap_batch" as const,
   typeArguments: [],
   functionArguments: [pools, tokenIn, tokenOut, amountIn, minOut, recipient],
 };
@@ -341,7 +526,7 @@ Pass just a public key for safe simulation without execution capability:
 ```typescript
 const client = new AptosClient({
   network: Network.MAINNET,
-  publicKey: "0xc75bb89f...",
+  publicKey: process.env.APTOS_PUBLIC_KEY,
 });
 
 // client.canExecute === false
@@ -355,7 +540,7 @@ Recommended for AI agents doing analysis.
 ```typescript
 import { diagnoseVmStatus } from "tx-composer";
 
-const errors = diagnoseVmStatus("Move abort at 0xc6bc...::lending");
+const errors = diagnoseVmStatus("Move abort at 0xc6bc659f1649553c1a3fa05d9727433dc03843baac29473c817d06d39e7621ba::lending");
 // [{ code: "LENDING_ERROR", title: "Lending protocol error",
 //    suggestion: "Check: repay amount <= debt, withdrawal won't breach health factor" }]
 ```
@@ -471,6 +656,7 @@ tx-composer/
 ├── dynamic/
 │   ├── types.ts       # StepArg, ComposerStep, ComposedResult, DynamicPlanJSON
 │   ├── composer.ts    # DynamicComposer class
+│   ├── validate.ts    # ABI pre-validation (fetches ABIs, checks args, detects non-droppable returns)
 │   └── report.ts      # Composed simulation report formatter
 ├── core/
 │   ├── client.ts      # AptosClient (wallet management, dual-mode)
@@ -492,7 +678,7 @@ tx-composer/
 │   ├── errors.ts      # VM error → actionable diagnosis
 │   └── forklift.ts    # Forklift state fork reader (optional)
 ├── types.ts           # Core type definitions
-└── index.ts           # Public API exports (33 exports)
+└── index.ts           # Public API exports
 ```
 
 ## Dependencies
