@@ -281,6 +281,38 @@ const result = await composer.simulate({ withFeePayer: true });
 
 Useful for AI agents previewing transactions for users who haven't funded their wallet yet.
 
+## Performance & Script Composer Limitations
+
+### Build latency breakdown
+
+A 4-step composed transaction (withdraw → swap → deposit → deposit) on mainnet:
+
+| Phase | Cold (1st call) | Warm (cached) | What's happening |
+|-------|----------------|---------------|------------------|
+| ABI validation | ~290ms | <1ms | Fetching function/module ABIs from chain |
+| `addBatchedCalls()` | ~270ms | ~185ms | SDK internally fetches module bytecodes |
+| WASM bytecode generation | ~11ms | <1ms | Actual script compilation |
+| **Total `build()`** | **~570ms** | **~185ms** | |
+
+The WASM compilation itself is sub-millisecond after the first run. The dominant cost is **network I/O** — the SDK's `addBatchedCalls()` re-fetches module bytecodes from chain on every build because it creates a new `AptosScriptComposer` instance internally. tx-composer's ABI validation cache eliminates its own network calls after the first run, but the SDK's internal fetches remain.
+
+### Script Composer design constraints
+
+**Arguments are baked into bytecode.** The Script Composer SDK embeds all literal values (amounts, addresses, pool IDs) as constants in the generated Move script bytecode. You cannot pre-compile a script and reuse it with different arguments — different args means different bytecode. Move scripts do support parameterized inputs, but the SDK chose to embed constants for simplicity and safety:
+
+- The WASM compiler doesn't need to map script parameters to function call arguments
+- What you simulate is exactly what you execute — no risk of arg substitution between simulation and signing
+- Return value wiring between steps (`arg.ref()`) is encoded as straight-line local variable moves, which is simpler when all values are known at compile time
+
+For production dapps with fixed flows (e.g., always "swap → repay → withdraw"), deploying a Move module with entry functions is more efficient than recompiling scripts per-transaction. Script Composer is best suited for dynamic/user-defined flows where the step sequence isn't known ahead of time.
+
+**Other constraints:**
+- Only **entry** and **public** functions can be composed — no view functions or private functions
+- Non-droppable return types (like `FungibleAsset`) must be consumed by a subsequent step or the transaction reverts
+- 64KB max transaction size limits practical step count to ~30-100 depending on complexity
+- No gas savings from composition — the value is atomicity, not efficiency
+- Multi-signer is supported in the WASM layer (`multi_signer(count)`) but `BuildScriptComposerTransaction` defaults to single signer
+
 ## Single Transaction Simulate + Execute
 
 For simple single-function transactions, use `buildAndSimulate()` directly:
