@@ -70,6 +70,8 @@ export type {
 export { DynamicComposer } from "./dynamic/composer.js";
 export { arg } from "./dynamic/types.js";
 export { formatComposedSummary } from "./dynamic/report.js";
+export { validateSteps } from "./dynamic/validate.js";
+export type { StepValidation, ValidationWarning } from "./dynamic/validate.js";
 
 // Types — simulation engine
 export type {

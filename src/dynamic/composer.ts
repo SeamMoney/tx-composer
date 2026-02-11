@@ -14,6 +14,11 @@ import {
 import { diagnoseVmStatus } from "../simulation/errors.js";
 import { executeTransaction } from "../core/transaction.js";
 import { formatComposedSummary } from "./report.js";
+import {
+  validateSteps,
+  type ValidationWarning,
+  type StepValidation,
+} from "./validate.js";
 import type {
   ComposerStep,
   StepArg,
@@ -98,6 +103,7 @@ export class DynamicComposer {
   private client: AptosClient;
   private steps: Array<{ label: string; step: ComposerStep }> = [];
   private tokens: TokenConfig[] = [];
+  private lastWarnings: ValidationWarning[] = [];
 
   constructor(client: AptosClient) {
     this.client = client;
@@ -116,9 +122,27 @@ export class DynamicComposer {
     return this;
   }
 
-  async build(): Promise<AnyRawTransaction> {
+  async validate(): Promise<{
+    validations: StepValidation[];
+    warnings: ValidationWarning[];
+  }> {
+    return validateSteps(this.client.aptos, this.steps);
+  }
+
+  async build(options?: { withFeePayer?: boolean }): Promise<AnyRawTransaction> {
     if (this.steps.length === 0) {
       throw new Error("DynamicComposer requires at least one step");
+    }
+
+    // Run ABI validation before building
+    const { warnings } = await validateSteps(this.client.aptos, this.steps);
+    this.lastWarnings = warnings;
+
+    // Hard errors (codes ending in _ERROR) abort the build
+    const hardErrors = warnings.filter((w) => w.code.endsWith("_ERROR"));
+    if (hardErrors.length > 0) {
+      const msgs = hardErrors.map((e) => e.message).join("\n  ");
+      throw new Error(`Validation failed:\n  ${msgs}`);
     }
 
     const steps = this.steps;
@@ -126,6 +150,7 @@ export class DynamicComposer {
     const transaction = await BuildScriptComposerTransaction({
       sender: this.client.accountAddress,
       aptosConfig: this.client.config,
+      withFeePayer: options?.withFeePayer,
       builder: async (composer) => {
         const resultsMap = new Map<string, CallArgument[]>();
         const signer = CallArgument.newSigner(0);
@@ -151,8 +176,10 @@ export class DynamicComposer {
     return transaction;
   }
 
-  async simulate(): Promise<ComposedResult> {
-    const transaction = await this.build();
+  async simulate(options?: {
+    withFeePayer?: boolean;
+  }): Promise<ComposedResult> {
+    const transaction = await this.build(options);
 
     const tokenRegistry = new Map<string, string>();
     for (const t of this.tokens) {
@@ -160,8 +187,13 @@ export class DynamicComposer {
     }
 
     const [rawResult] = await this.client.aptos.transaction.simulate.simple({
-      signerPublicKey: this.client.publicKey,
+      signerPublicKey: options?.withFeePayer
+        ? undefined
+        : this.client.publicKey,
       transaction,
+      ...(options?.withFeePayer
+        ? { feePayerPublicKey: this.client.publicKey }
+        : {}),
     });
 
     const simulation = parseSimulationResult(rawResult, tokenRegistry);
@@ -192,6 +224,7 @@ export class DynamicComposer {
       ? []
       : diagnoseVmStatus(simulation.vmStatus);
 
+    const warnings = this.lastWarnings;
     const stepLabels = this.steps.map((s) => s.label);
 
     const summary = formatComposedSummary(
@@ -199,6 +232,7 @@ export class DynamicComposer {
       simulation,
       balanceDiff,
       errors,
+      warnings,
     );
 
     const client = this.client;
@@ -209,6 +243,7 @@ export class DynamicComposer {
       transaction,
       balanceDiff,
       errors,
+      warnings,
       summary,
       stepLabels,
       execute: () =>

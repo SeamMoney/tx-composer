@@ -1,11 +1,13 @@
 import type { SimulationResult } from "../types.js";
 import type { BalanceDiff, DiagnosedError } from "../simulation/types.js";
+import type { ValidationWarning } from "./validate.js";
 
 export function formatComposedSummary(
   stepLabels: string[],
   simulation: SimulationResult,
   balanceDiff: BalanceDiff | undefined | null,
   errors: DiagnosedError[],
+  warnings?: ValidationWarning[],
 ): string {
   const lines: string[] = [];
 
@@ -44,6 +46,14 @@ export function formatComposedSummary(
     }
     if (simulation.events.length > 10) {
       lines.push(`  ... and ${simulation.events.length - 10} more`);
+    }
+    lines.push("");
+  }
+
+  if (warnings && warnings.length > 0) {
+    lines.push(`Warnings (${warnings.length}):`);
+    for (const w of warnings) {
+      lines.push(`  [${w.code}] ${w.message}`);
     }
     lines.push("");
   }

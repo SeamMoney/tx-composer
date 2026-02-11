@@ -1,6 +1,7 @@
 import type { AnyRawTransaction } from "@aptos-labs/ts-sdk";
 import type { TokenConfig, SimulationResult, ExecutionResult } from "../types.js";
 import type { BalanceDiff, DiagnosedError } from "../simulation/types.js";
+import type { ValidationWarning } from "./validate.js";
 
 // ── Argument System ───────────────────────────────────────────────
 
@@ -42,6 +43,7 @@ export interface ComposedResult {
   transaction: AnyRawTransaction;
   balanceDiff: BalanceDiff | null;
   errors: DiagnosedError[];
+  warnings: ValidationWarning[];
   summary: string;
   stepLabels: string[];
   execute: () => Promise<ExecutionResult>;

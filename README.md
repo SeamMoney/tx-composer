@@ -12,6 +12,26 @@ npm install tx-composer
 
 Requires `@aptos-labs/ts-sdk` v5+.
 
+## What this adds over `@aptos-labs/script-composer-sdk`
+
+The Script Composer SDK gives you the raw primitive: `BuildScriptComposerTransaction` + `CallArgument` wiring inside a builder callback. It's powerful but low-level — you manage WASM initialization, manually track `CallArgument[]` arrays, simulate separately, and parse results yourself.
+
+tx-composer wraps that into a **declare → simulate → execute** workflow:
+
+| Concern | Raw Script Composer SDK | tx-composer |
+|---------|------------------------|-------------|
+| **Defining steps** | Imperative builder callback, manual `CallArgument` bookkeeping | Declarative `.addStep()` with labeled refs (`arg.ref("swap", 0)`) |
+| **ABI validation** | Errors surface as cryptic WASM failures | Pre-build validation: checks function existence, arg count, signer vs address, unconsumed non-droppable returns |
+| **Simulation** | Call separately, get raw `UserTransactionResponse` | `.simulate()` builds + simulates + returns parsed `ComposedResult` |
+| **Fee payer** | Manual `withFeePayer` flag + separate fee payer key | `.simulate({ withFeePayer: true })` — simulate without sender needing gas |
+| **Balance tracking** | Manual — query before, query after, compute diff | `.trackTokens([...])` — owner-aware primary store matching, auto-snapshots, human-readable deltas |
+| **Error handling** | Raw VM status string | `diagnoseVmStatus()` maps to actionable errors with suggestions |
+| **Reporting** | Write your own | `result.summary` — formatted report with steps, gas, balance changes, events, warnings, errors |
+| **Execution** | Build signer, submit, wait — all manual | `result.execute()` — one call, returns hash + status |
+| **AI-agent input** | N/A — TypeScript only | `DynamicComposer.fromJSON(client, plan)` — JSON schema an LLM can generate |
+
+In short: Script Composer SDK handles the **transaction composition**. tx-composer handles everything around it — ABI validation, simulation, balance tracking, error diagnosis, and execution — so you (or an AI agent) can go from a declarative plan to a confirmed on-chain result in a few lines.
+
 ## DynamicComposer — The Core API
 
 Compose any Move function calls into a single atomic transaction. Wire return values between steps. Simulate and get a full report. Execute if it passes.
@@ -236,6 +256,31 @@ if (result.success) {
 }
 ```
 
+## ABI Pre-Validation
+
+Every `.build()` and `.simulate()` call automatically fetches on-chain ABIs and validates your steps before touching WASM. Catches common mistakes with clear messages:
+
+```typescript
+const { warnings } = await composer.validate();
+// [{ code: "SIGNER_MISMATCH", message: 'Step "deposit" arg 0: used arg.signer() but parameter type is "address" — use arg.literal(address) instead' }]
+// [{ code: "ARG_COUNT_ERROR", message: 'Step "swap": expected 6 non-signer argument(s), got 4' }]
+// [{ code: "UNCONSUMED_RESOURCE", message: 'Step "withdraw" return[0] (FungibleAsset) is non-droppable but not consumed by any subsequent step' }]
+// [{ code: "FUNCTION_NOT_FOUND_ERROR", message: 'Function "0x1::fake::function" not found on-chain' }]
+```
+
+Hard errors (codes ending in `_ERROR`) abort the build. Soft warnings (like `UNCONSUMED_RESOURCE`, `SIGNER_MISMATCH`) are included in `result.warnings` and the summary report.
+
+## Fee Payer Simulation
+
+Simulate transactions even when the sender wallet has no APT for gas:
+
+```typescript
+const result = await composer.simulate({ withFeePayer: true });
+// Simulation succeeds without checking sender's gas balance
+```
+
+Useful for AI agents previewing transactions for users who haven't funded their wallet yet.
+
 ## Single Transaction Simulate + Execute
 
 For simple single-function transactions, use `buildAndSimulate()` directly:
@@ -361,8 +406,9 @@ console.log(report.summary);
 | `new DynamicComposer(client)` | Create a composer for the given client |
 | `.addStep(label, { function, typeArguments?, args })` | Add a Move function call |
 | `.trackTokens(tokens[])` | Track balance changes for these tokens |
-| `.build()` | Build the composed transaction |
-| `.simulate()` | Build + simulate + parse into `ComposedResult` |
+| `.validate()` | Fetch ABIs and validate all steps (returns `{ validations, warnings }`) |
+| `.build(options?)` | Validate + build the composed transaction. `{ withFeePayer: true }` for fee payer mode |
+| `.simulate(options?)` | Build + simulate + parse into `ComposedResult`. `{ withFeePayer: true }` to skip gas check |
 | `DynamicComposer.fromJSON(client, json)` | Construct from a JSON plan |
 
 ### arg Helpers

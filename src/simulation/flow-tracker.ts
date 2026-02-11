@@ -1,4 +1,9 @@
-import type { Aptos, UserTransactionResponse } from "@aptos-labs/ts-sdk";
+import {
+  type Aptos,
+  type UserTransactionResponse,
+  AccountAddress,
+  createObjectAddress,
+} from "@aptos-labs/ts-sdk";
 import type { TokenConfig } from "../types.js";
 import type {
   BalanceSnapshot,
@@ -35,9 +40,18 @@ export function extractBalancesFromSimulation(
   tokens: TokenConfig[],
   owner: string,
 ): Map<string, bigint> {
-  const trackedMetadata = new Set(tokens.map((t) => t.metadata.toLowerCase()));
   const result = new Map<string, bigint>();
   const changes = ((raw as Record<string, unknown>).changes as unknown[]) ?? [];
+
+  // Pre-compute expected primary store addresses for each tracked token.
+  // Primary fungible stores are deterministic: sha3_256(owner_bcs || metadata_bcs || 0xFE)
+  const ownerAddr = AccountAddress.from(owner);
+  const expectedStores = new Map<string, string>(); // lowercase storeAddr → canonical metadata
+  for (const token of tokens) {
+    const metaAddr = AccountAddress.from(token.metadata);
+    const storeAddr = createObjectAddress(ownerAddr, metaAddr.toUint8Array());
+    expectedStores.set(storeAddr.toString().toLowerCase(), token.metadata);
+  }
 
   for (const change of changes) {
     const c = change as Record<string, unknown>;
@@ -47,29 +61,17 @@ export function extractBalancesFromSimulation(
     if (!data || typeof data.type !== "string") continue;
     if (!data.type.includes("FungibleStore")) continue;
 
+    // Match by store address — only pick up the owner's primary store
+    const storeAddress = (c.address as string)?.toLowerCase();
+    if (!storeAddress) continue;
+
+    const canonicalMeta = expectedStores.get(storeAddress);
+    if (!canonicalMeta) continue;
+
     const inner = data.data as Record<string, unknown> | undefined;
     if (!inner?.balance) continue;
 
-    const metadata = (inner.metadata as Record<string, unknown>)?.inner as string;
-    if (!metadata) continue;
-
-    if (!trackedMetadata.has(metadata.toLowerCase())) continue;
-
-    // Find the canonical metadata address (preserve original casing from token config)
-    const canonicalMeta = tokens.find(
-      (t) => t.metadata.toLowerCase() === metadata.toLowerCase(),
-    )?.metadata;
-    if (!canonicalMeta) continue;
-
-    const balance = BigInt(String(inner.balance));
-
-    // Aggregate: if multiple stores for same token, take the one associated with owner.
-    // For primary fungible stores, there's typically one per token per owner.
-    // We use the highest balance found (most likely the owner's store, not a pool store).
-    const existing = result.get(canonicalMeta);
-    if (existing === undefined || balance > existing) {
-      result.set(canonicalMeta, balance);
-    }
+    result.set(canonicalMeta, BigInt(String(inner.balance)));
   }
 
   return result;
