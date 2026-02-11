@@ -217,7 +217,7 @@ AI agents generate transaction plans as JSON. The host application passes them t
 
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
-| `tokens` | `TokenConfig[]` | No | Tokens to track balance changes for |
+| `tokens` | `TokenConfig[]` | No | Optional. If provided, `result.balanceDiff` will show before/after deltas for these tokens. Omit if you only care about success/failure. |
 | `tokens[].symbol` | `string` | Yes | Display name (e.g. `"USDC"`) |
 | `tokens[].metadata` | `string` | Yes | On-chain metadata address (`0x...`, 64 hex chars) |
 | `tokens[].decimals` | `integer` | Yes | Decimal places (6 for USDC, 8 for APT) |
@@ -241,6 +241,28 @@ AI agents generate transaction plans as JSON. The host application passes them t
 2. **Non-droppable returns must be consumed**: `FungibleAsset` does not have the `drop` ability. If a step returns one, a later step must consume it via `ref` (e.g. deposit it). Unconsumed non-droppable values revert the transaction.
 3. **Step order matters**: Steps execute in array order. A `ref` can only reference a step that appears earlier in the array.
 4. **Bigint encoding**: JSON has no native bigint. Encode large numbers as strings with an `n` suffix: `"1000000n"` becomes `BigInt(1000000)`.
+
+#### Example: Minimal (no token tracking)
+
+The simplest possible plan — just steps, no `tokens`. You get `result.success` and `result.summary` but no `balanceDiff`.
+
+```json
+{
+  "steps": [
+    {
+      "label": "transfer",
+      "function": "0x1::primary_fungible_store::transfer",
+      "typeArguments": ["0x1::fungible_asset::Metadata"],
+      "args": [
+        { "kind": "signer" },
+        { "kind": "literal", "value": "0xbae207659db88bea0cbead6da0ed00aac12edcdda169e591cd41c94180b46f3b" },
+        { "kind": "literal", "value": "<recipient-address>" },
+        { "kind": "literal", "value": "1000000n" }
+      ]
+    }
+  ]
+}
+```
 
 #### Example: Simple swap (USDC → USD1)
 
