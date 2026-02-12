@@ -488,6 +488,116 @@ const result = await composer.simulate({ withFeePayer: true });
 
 Useful for AI agents previewing transactions for users who haven't funded their wallet yet.
 
+## Forked Simulation (via Forklift)
+
+Fork mainnet state and run Move functions sequentially — each call sees the previous call's state changes. Inspect how on-chain state changed: pool reserves after a swap, lending positions after repayment, etc.
+
+Requires `@aptos-labs/forklift` (optional peer dependency) and [Aptos CLI](https://aptos.dev/build/cli) v7.14.1+.
+
+```bash
+npm install @aptos-labs/forklift
+```
+
+### Inspect pool state after a swap
+
+```typescript
+import { ForkedSession } from "tx-composer";
+
+const HYPERION = "0x8b4a2c4bb53857c718a04c020b98f8c2e1f99a68b0f57389a8bf5434cd22e05c";
+const POOL = "0x1609a6f6e914e60bf958d0e1ba24a471ee2bcadeca9e72659336a1f002be50db";
+
+const fork = ForkedSession.create({
+  apiKey: process.env.APTOS_API_KEY,
+  privateKey: process.env.APTOS_PRIVATE_KEY,
+});
+
+// Read pool state before
+fork.snapshot("before", [
+  { account: POOL, resourceType: `${HYPERION}::pool_v3::LiquidityPoolV3` },
+]);
+
+// Swap against the fork — state changes persist
+fork.run(`${HYPERION}::pool_v3::swap`, {
+  args: [
+    `address:${POOL}`, "bool:false", "bool:true",
+    "u64:1000000", "u64:0", "u128:79226673515401279992447579055",
+  ],
+});
+
+// Read pool state after
+fork.snapshot("after", [
+  { account: POOL, resourceType: `${HYPERION}::pool_v3::LiquidityPoolV3` },
+]);
+
+// See what changed
+const changes = fork.diff("before", "after");
+console.log(changes);
+// [{ account: "0x1609...", resourceType: "...::LiquidityPoolV3",
+//    before: { liquidity: "2899680723522387", sqrt_price: "18441225413107329731", ... },
+//    after:  { liquidity: "2899680723522387", sqrt_price: "18441225413107329600", ... } }]
+
+fork.cleanup();
+```
+
+### Read any on-chain resource
+
+```typescript
+// Direct resources (regular accounts)
+const account = fork.readResource("0x1", "0x1::account::Account");
+
+// Object-based resources (DEX pools, lending markets, etc.)
+// readResource auto-falls back to resource groups for objects
+const pool = fork.readResource(POOL, `${HYPERION}::pool_v3::LiquidityPoolV3`);
+
+// Read all resources in an object at once
+const allResources = fork.readResourceGroup(POOL);
+// { "0x1::object::ObjectCore": {...}, "...::LiquidityPoolV3": {...}, ... }
+
+// View functions
+const result = fork.view("0x1::coin::balance", ["address:0x1"], ["0x1::aptos_coin::AptosCoin"]);
+```
+
+### Sequential state changes
+
+Each `run()` call mutates fork state. Subsequent calls see previous changes:
+
+```typescript
+// Step 1: transfer tokens
+fork.run("0x1::aptos_account::transfer", {
+  args: ["address:0xRECIPIENT", "u64:1000000"],
+});
+
+// Step 2: this sees step 1's state changes
+const balance = fork.view("0x1::coin::balance",
+  ["address:0xRECIPIENT"],
+  ["0x1::aptos_coin::AptosCoin"],
+);
+```
+
+### ForkedSession vs DynamicComposer
+
+| | ForkedSession | DynamicComposer |
+|--|---------------|-----------------|
+| **Execution** | Sequential individual calls | Single atomic transaction |
+| **State** | Each call sees prior state | All steps share one tx |
+| **Use case** | "What happens to the pool if I swap?" | "Compose withdraw+swap+deposit atomically" |
+| **Powered by** | Aptos CLI + Forklift | Script Composer WASM |
+| **Requires** | API key + Aptos CLI | Nothing extra |
+
+### ForkedSession API
+
+| Method | Description |
+|--------|------------|
+| `ForkedSession.create(config)` | Fork a network. Config: `{ apiKey, network?, networkVersion?, privateKey? }` |
+| `.run(functionId, { args?, typeArgs? })` | Execute a Move function. Args use `type:value` format (e.g. `"u64:1000"`) |
+| `.readResource(account, type)` | Read a resource (auto-falls back to resource group for objects) |
+| `.readResourceGroup(account)` | Read all resources in an object |
+| `.view(functionId, args?, typeArgs?)` | Call a view function |
+| `.snapshot(label, queries)` | Capture state of specified resources under a label |
+| `.diff(before, after)` | Compare two snapshots, returns `ResourceDiff[]` |
+| `.senderAddress` | The sender's address in this fork |
+| `.cleanup()` | Delete temp directory. Session is unusable after this. |
+
 ## Performance & Script Composer Limitations
 
 ### Build latency breakdown
