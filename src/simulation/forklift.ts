@@ -111,11 +111,45 @@ export class ForkedSession {
 
   /**
    * Read a resource from the fork's current state.
+   * Tries direct resource first, then falls back to resource group
+   * (needed for object-based resources like DEX pools).
    * Returns the resource data, or null if not found.
    */
   readResource(account: string, resourceType: string): unknown {
+    // Try direct resource first
     const res = this.harness.viewResource(account, resourceType);
-    return res?.Result ?? null;
+    if (res?.Result != null) return res.Result;
+
+    // Fall back to resource group (objects store resources in groups)
+    try {
+      const group = this.harness.viewResourceGroup(
+        account,
+        "0x1::object::ObjectGroup",
+      );
+      if (group?.Result?.[resourceType] != null) {
+        return group.Result[resourceType];
+      }
+    } catch {
+      // Resource group not available
+    }
+
+    return null;
+  }
+
+  /**
+   * Read all resources in an account's object group.
+   * Returns a map of resource type → data, or null if not an object.
+   */
+  readResourceGroup(
+    account: string,
+    group = "0x1::object::ObjectGroup",
+  ): Record<string, unknown> | null {
+    try {
+      const res = this.harness.viewResourceGroup(account, group);
+      return (res?.Result as Record<string, unknown>) ?? null;
+    } catch {
+      return null;
+    }
   }
 
   /**
