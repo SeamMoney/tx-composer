@@ -37,7 +37,12 @@ export type { EchelonConfig } from "./protocols/echelon/index.js";
 
 // Simulation — parsing
 export { parseSimulationResult } from "./simulation/simulate.js";
-export { ForkliftReader } from "./simulation/forklift.js";
+export { ForkedSession } from "./simulation/forklift.js";
+export type {
+  ForkedSessionConfig,
+  ForkStepResult,
+  ResourceDiff,
+} from "./simulation/forklift.js";
 
 // Simulation — flow engine
 export { SimulationPlanBuilder, dryRun } from "./simulation/plan.js";
